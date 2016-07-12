@@ -171,6 +171,83 @@ __global__ void CUDASearchInTheKDBox(unsigned int nPoints,  float* dimensions,  
     
 }
 
+#define MAX_FRONTIER 256
+
+__global__ void CUDABFSparallel (unsigned int nPoints,  float* dimensions,  unsigned int* ids,  unsigned int* results) {
+	__shared__ int frontier[MAX_FRONTIER];
+	__shared__ int frontnext[MAX_FRONTIER];
+	__shared__ int pfound[MAX_FRONTIER];
+
+	unsigned int point_index = blockIdx.x;
+	unsigned int thread_index = threadIdx.x;
+
+	unsigned int found = 0;
+
+	if (point_index < nPoints) {
+		int theDepth = floor(log2((float)nPoints));
+		float minPoint[NUM_DIMENSIONS];
+		float maxPoint[NUM_DIMENSIONS];
+        for(int i = 0; i<NUM_DIMENSIONS; ++i) {
+			minPoint[i] = dimensions[nPoints*i+point_index] - RANGE;
+			maxPoint[i] = dimensions[nPoints*i+point_index] + RANGE;
+		}
+
+		//if (thread_index < MAX_FRONTIER) {
+			frontier[0] = 0;
+
+			int startSon;
+			int endSon = startSon-1;
+
+			for (int depth = 0; depth < theDepth+1; ++depth) {
+				int dimension = depth % NUM_DIMENSIONS;
+
+				unsigned int index = frontier[thread_index];
+				frontier[thread_index] = nPoints;
+
+				if (index < nPoints) {
+					int intersection = intersects(index, dimensions,nPoints,minPoint,maxPoint,dimension);
+
+					if (intersection && isInTheBox(index,dimensions,nPoints,minPoint,maxPoint)) {
+						if (found < MAX_RESULT_SIZE) {
+								//results[resultIndex] = index;
+								resultIndex++;
+								found++;
+						}
+					}
+
+					startSon = dimensions[nPoints*dimension+index] < minPoint[dimension];
+					endSon = startSon || intersection;
+				}
+
+				int next = 0;
+
+				for (int whichSon = startSon; whichSon < endSon+1; ++whichSon)
+					next += (leftSonIndex(index) + whichSon < nPoints);
+				frontnext[thread_index] = next;
+
+				__syncthreads();
+
+				thrust::exclusive_scan(frontnext,frontnext+MAX_FRONTIER,frontnext);				
+				write_offset = frontnext[thread_index];
+
+				for (int i = startSon; i < startSon+next; i++, write_offset++) {
+					frontier[write_offset] = leftSonIndex(index)+i;
+				}
+
+				__syncthreads();
+
+				endSon = startSon-1;
+			}
+
+			pfound[thread_index] = found;
+
+			unsigned int pointsFound = thrust::reduce(pfound, pfound+MAX_FRONTIER);
+
+			results[point_index] = pointsFound;
+		//}
+	}
+}
+
 void CUDAKernelWrapper(unsigned int nPoints,float *d_dim,unsigned int *d_ids,unsigned int *d_results)
 {
 

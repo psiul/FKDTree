@@ -539,10 +539,12 @@ int main(int argc, char* argv[])
 			float* host_dimensions;
 			unsigned int* host_results;
 
+			unsigned int nQueries = nPoints*256;
+
 			// host allocations
 			host_ids = (unsigned int*)malloc(nPoints * sizeof(unsigned int));
 			host_dimensions = (float*)malloc(3*nPoints * sizeof(float));
-			host_results = (unsigned int*)malloc((nPoints + nPoints * maxResultSize)
+			host_results = (unsigned int*)malloc((nQueries + nQueries * maxResultSize)
 					* sizeof(unsigned int));
 
 			//initialise ids
@@ -565,7 +567,7 @@ int main(int argc, char* argv[])
 			// Allocate device memory
 			cudaMalloc(&d_dim, 3*nPoints * sizeof(float));
 			cudaMalloc(&d_ids, nPoints * sizeof(unsigned int));
-			cudaMalloc(&d_results, (nPoints + nPoints * maxResultSize)
+			cudaMalloc(&d_results, (nQueries + nQueries * maxResultSize)
 					* sizeof(unsigned int));
 
 			// Copy host vectors to device
@@ -582,7 +584,7 @@ int main(int argc, char* argv[])
 			tbb::tick_count::now();
 
 			// Back to host
-			cudaMemcpy( host_results, d_results, (nPoints + nPoints * maxResultSize)
+			cudaMemcpy( host_results, d_results, (nQueries + nQueries * maxResultSize)
 					* sizeof(unsigned int), cudaMemcpyDeviceToHost );
 
 			// Release device memory
@@ -593,11 +595,11 @@ int main(int argc, char* argv[])
 			if (runTheTests)
 			{
 				int totalNumberOfPointsFound = 0;
-				for(int p = 0; p<nPoints; p++)
+				for(int p = 0; p<nQueries; p++)
 				{
 					unsigned int length = host_results[p];
 					totalNumberOfPointsFound += length;
-					int firstIndex = nPoints + maxResultSize*p;
+					int firstIndex = nQueries + maxResultSize*p;
 
 				}
 
