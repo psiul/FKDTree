@@ -172,81 +172,143 @@ __global__ void CUDASearchInTheKDBox(unsigned int nPoints,  float* dimensions,  
 }
 
 #define MAX_FRONTIER 256
+#define THREADS_PER_QUERY 16
+#define QUERIES_PER_BLOCK (BLOCKSIZE/THREADS_PER_QUERY)
 
-__global__ void CUDABFSparallel (unsigned int nPoints,  float* dimensions,  unsigned int* ids,  unsigned int* results) {
-	__shared__ int frontier[MAX_FRONTIER];
-	__shared__ int frontnext[MAX_FRONTIER];
-	__shared__ int pfound[MAX_FRONTIER];
+__global__ void CUDABFSparallel (unsigned int nPoints,  float* dimensions,  unsigned int* ids,  unsigned int* results, unsigned int* debug) {
+	//__shared__ int frontier[QUERIES_PER_BLOCK][MAX_FRONTIER];
+	//__shared__ int frontnext[QUERIES_PER_BLOCK][THREADS_PER_QUERY];
+	//__shared__ int pfound[QUERIES_PER_BLOCK][THREADS_PER_QUERY];
 
-	unsigned int point_index = blockIdx.x;
-	unsigned int thread_index = threadIdx.x;
+	unsigned int gid = threadIdx.x/THREADS_PER_QUERY;
+	unsigned int pid = blockIdx.x*QUERIES_PER_BLOCK+gid;
+	unsigned int tid = threadIdx.x%THREADS_PER_QUERY;
 
+	unsigned int* frontier = debug+nPoints*2*THREADS_PER_QUERY+pid*MAX_FRONTIER;
+	unsigned int* frontnext =  debug+nPoints*THREADS_PER_QUERY+pid*THREADS_PER_QUERY;
+	unsigned int* pfound = debug+pid*THREADS_PER_QUERY;
+
+	if (pid < nPoints) {
 	unsigned int found = 0;
+	unsigned int sync = 4;
+		
+	int theDepth = floor(log2((float)nPoints));
+	float minPoint[NUM_DIMENSIONS];
+	float maxPoint[NUM_DIMENSIONS];
+	for(int i = 0; i<NUM_DIMENSIONS; ++i) {
+		minPoint[i] = dimensions[nPoints*i+pid] - RANGE;
+		maxPoint[i] = dimensions[nPoints*i+pid] + RANGE;
+	}
+		
 
-	if (point_index < nPoints) {
-		int theDepth = floor(log2((float)nPoints));
-		float minPoint[NUM_DIMENSIONS];
-		float maxPoint[NUM_DIMENSIONS];
-        for(int i = 0; i<NUM_DIMENSIONS; ++i) {
-			minPoint[i] = dimensions[nPoints*i+point_index] - RANGE;
-			maxPoint[i] = dimensions[nPoints*i+point_index] + RANGE;
-		}
+	Queue indecesToVisit;
+	indecesToVisit.front = indecesToVisit.tail = indecesToVisit.size = 0;
 
-		//if (thread_index < MAX_FRONTIER) {
-			frontier[0] = 0;
+	if (tid == 0)
+		push_back(&indecesToVisit, 0);
 
-			int startSon;
-			int endSon = startSon-1;
+	unsigned int resultIndex = nPoints + MAX_RESULT_SIZE*pid;
+	
+	for (int depth = 0; depth < theDepth+1; ++depth) {
+		if (depth == sync) {
+			sync = sync + 3;
 
-			for (int depth = 0; depth < theDepth+1; ++depth) {
-				int dimension = depth % NUM_DIMENSIONS;
+			//synchronize in frontier and balance load
+			//frontnext[gid][tid] = indecesToVisit.size; 
+			frontnext[tid] = indecesToVisit.size;
+			__syncthreads ();
 
-				unsigned int index = frontier[thread_index];
-				frontier[thread_index] = nPoints;
-
-				if (index < nPoints) {
-					int intersection = intersects(index, dimensions,nPoints,minPoint,maxPoint,dimension);
-
-					if (intersection && isInTheBox(index,dimensions,nPoints,minPoint,maxPoint)) {
-						if (found < MAX_RESULT_SIZE) {
-								//results[resultIndex] = index;
-								resultIndex++;
-								found++;
-						}
-					}
-
-					startSon = dimensions[nPoints*dimension+index] < minPoint[dimension];
-					endSon = startSon || intersection;
-				}
-
-				int next = 0;
-
-				for (int whichSon = startSon; whichSon < endSon+1; ++whichSon)
-					next += (leftSonIndex(index) + whichSon < nPoints);
-				frontnext[thread_index] = next;
-
+			for (unsigned int i = 1; i < THREADS_PER_QUERY; i<<=1) {
+				int add;
+        	                if (tid >= i) add = frontnext[tid-i];
+                        	       // add = frontnext[gid][tid-i];
+                        	__syncthreads();
+                        	if (tid >= i) frontnext[tid] += add;
+                                	//frontnext[gid][tid] += add;
 				__syncthreads();
+	                }
 
-				thrust::exclusive_scan(frontnext,frontnext+MAX_FRONTIER,frontnext);				
-				write_offset = frontnext[thread_index];
+			//unsigned int active = frontnext[gid][THREADS_PER_QUERY-1];
+			//unsigned int len = indecesToVisit.size;
+			//unsigned int offset = frontnext[gid][tid]-len;
+			unsigned int active = frontnext[THREADS_PER_QUERY-1];
+                        unsigned int len = indecesToVisit.size;
+                        unsigned int offset = frontnext[tid]-len;
+			//unsigned int extra = active%THREADS_PER_QUERY;
+			//unsigned int extrapred = (tid < extra)?tid:extra;		
 
-				for (int i = startSon; i < startSon+next; i++, write_offset++) {
-					frontier[write_offset] = leftSonIndex(index)+i;
-				}
+			//unsigned int r_start = (active/THREADS_PER_QUERY)*tid+extrapred;
+			//unsigned int r_end = r_start+active/THREADS_PER_QUERY+(tid < extra);
 
-				__syncthreads();
-
-				endSon = startSon-1;
+			//unsigned int w_end = frontnext[gid][tid];
+			//unsigned int w_start = w_end-indecesToVisit.size;
+			
+			//if (pid == 0) printf ("r_start= %d r_end= %d\n", r_start, r_end);
+			
+			for (int i = 0; i < len; i++) {
+				frontier[i+offset] = pop_front(&indecesToVisit);
+				//frontier[gid][i+offset] = pop_front(&indecesToVisit);
+			}
+			__syncthreads ();
+		
+			for (int i = tid; i < active; i+=THREADS_PER_QUERY) {
+				push_back(&indecesToVisit, frontier[i]);
+				//push_back(&indecesToVisit, frontier[gid][i]);
 			}
 
-			pfound[thread_index] = found;
+		}		
+		
+		int dimension = depth % NUM_DIMENSIONS;
+		unsigned int toVisit = indecesToVisit.size;
 
-			unsigned int pointsFound = thrust::reduce(pfound, pfound+MAX_FRONTIER);
+		for (unsigned int visited = 0; visited < toVisit; visited++) {
+			unsigned int index = pop_front(&indecesToVisit);
 
-			results[point_index] = pointsFound;
-		//}
+			//if (pid == 0)
+			//	printf ("Visited %d\n", index);
+
+			bool intersection = intersects(index, dimensions, nPoints, minPoint, maxPoint, dimension);
+
+			if (intersection && isInTheBox(index,dimensions,nPoints,minPoint,maxPoint)) {
+				if (found < MAX_RESULT_SIZE) {
+					//results[resultIndex] = index;
+					resultIndex++;
+					found++;
+				}
+			}
+			
+			bool isLowerThanBoxMin = dimensions[nPoints*dimension+index] < minPoint[dimension];
+			int startSon = isLowerThanBoxMin;
+			int endSon = startSon || intersection;
+
+			for (int whichSon = startSon; whichSon < endSon + 1; ++whichSon) {
+				unsigned int indexToAdd = leftSonIndex(index)+whichSon;
+				if (indexToAdd < nPoints)
+					push_back(&indecesToVisit, indexToAdd);
+			}
+		}			
+	}
+	
+	//pfound[gid][tid] = found;
+	pfound[tid] = found;
+	__syncthreads();
+
+	for (unsigned int s = THREADS_PER_QUERY/2; s > 0; s >>= 1) {
+		if (tid < s)pfound[tid] += pfound[tid+s];
+			//pfound[gid][tid] += pfound[gid][tid+s];
+		__syncthreads();
+	}
+
+	if (tid == 0) {
+		results[pid] = pfound[0];
+		//printf ("%d\n", pfound[0]);
+		//results[pid] = pfound[gid][0];
+	}
+
+	__syncthreads ();
 	}
 }
+
 
 void CUDAKernelWrapper(unsigned int nPoints,float *d_dim,unsigned int *d_ids,unsigned int *d_results)
 {
